@@ -1,0 +1,11 @@
+/*
+ * File: assets/css/admin.css
+ * Description: Admin styling for Buzzsaw push pie and layout.
+ * Plugin: Buzzsaw
+ * Author: Eric Kowalewski
+ * Last Updated: 2025-10-13 18:20 EDT
+ */
+#buzzsaw-progress{ display:flex; align-items:center; gap:16px; margin-top:16px; }
+#buzzsaw-pct{ font-size: 28px; font-weight: 600; }
+#buzzsaw-status{ color:#444; opacity:.9; }
+#buzzsaw-controls .button{ margin-right:8px; }
