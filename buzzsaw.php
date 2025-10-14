@@ -3,13 +3,13 @@
  * Plugin Name: Buzzsaw
  * Description: Copies each product’s Featured Image and original-art (custom field URL) into a fixed mount: /mnt/ccpi/mnt/nas/Website-Orders/<Site Title>/<Product Title>. Skips identical files (same size). Background-safe with live progress and nightly cron (1–5 AM). Auto-updates from GitHub.
  * Author: Eric Kowalewski
- * Version: 1..1
+Version: 1.1.13
  * Update URI: https://github.com/emkowale/buzzsaw
  */
 
 if (!defined('ABSPATH')) exit;
 
-define('BUZZSAW_VERSION', '1..1');
+define('BUZZSAW_VERSION', '1.1.13');
 define('BUZZSAW_PATH', plugin_dir_path(__FILE__));
 define('BUZZSAW_URL',  plugin_dir_url(__FILE__));
 define('BUZZSAW_BASE_PATH', '/mnt/ccpi/mnt/nas/Website-Orders');
