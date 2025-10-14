@@ -1,77 +1,172 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# =========================
+# Config (edit per project)
+# =========================
 OWNER="emkowale"
 REPO="buzzsaw"
 PLUGIN_SLUG="buzzsaw"
+MAIN_FILE="${PLUGIN_SLUG}.php"
 REMOTE_URL="git@github.com:${OWNER}/${REPO}.git"
 
+# Usage: ./release {major|minor|patch}
 BUMP_TYPE="${1:-}"
-FORCE=false
+[[ -z "$BUMP_TYPE" ]] && { echo "Usage: ./release {major|minor|patch}"; exit 1; }
 
-if [[ -z "$BUMP_TYPE" ]]; then
-  echo "Usage: ./release {major|minor|patch} [--force]"
-  exit 1
-fi
+# =========================
+# Helpers
+# =========================
+say() { printf "\033[1;36m%s\033[0m\n" "$*"; }
+warn() { printf "\033[1;33m%s\033[0m\n" "$*"; }
+err() { printf "\033[1;31m%s\033[0m\n" "$*" >&2; }
 
-if [[ "${2:-}" == "--force" ]]; then
-  FORCE=true
-fi
+require_cmd() {
+  command -v "$1" >/dev/null 2>&1 || { err "Missing '$1'"; exit 1; }
+}
 
+bump_version() {
+  local current vmaj vmin vpatch new
+  current="$(grep -Eo 'Version:\s*[0-9]+\.[0-9]+\.[0-9]+' "$MAIN_FILE" | awk '{print $2}')"
+  [[ -z "$current" ]] && { err "Could not read Version: from $MAIN_FILE"; exit 1; }
+  IFS='.' read -r vmaj vmin vpatch <<<"$current"
+  case "$BUMP_TYPE" in
+    major) vmaj=$((vmaj+1)); vmin=0; vpatch=0;;
+    minor) vmin=$((vmin+1)); vpatch=0;;
+    patch) vpatch=$((vpatch+1));;
+    *) err "Unknown bump type: $BUMP_TYPE"; exit 1;;
+  esac
+  new="${vmaj}.${vmin}.${vpatch}"
+  # Update header and constant
+  sed -i.bak -E "s/(Version:\s*)[0-9]+\.[0-9]+\.[0-9]+/\1${new}/" "$MAIN_FILE"
+  sed -i.bak -E "s/(define\('BUZZSAW_VERSION',\s*')[^']+(')/\1${new}\2/" "$MAIN_FILE"
+  rm -f "${MAIN_FILE}.bak"
+  printf "%s" "$new"
+}
+
+clean_zip_build() {
+  local tag="$1" out="../${PLUGIN_SLUG}-${tag}.zip"
+  say "Building clean ZIP via git archive → ${out}"
+  git archive --format=zip --prefix="${PLUGIN_SLUG}/" "$tag" -o "$out"
+  say "ZIP ready: $out"
+}
+
+create_release() {
+  local tag="$1" zip="../${PLUGIN_SLUG}-${tag}.zip"
+  if command -v gh >/dev/null 2>&1; then
+    say "Creating GitHub Release with gh CLI"
+    gh release delete "$tag" -y >/dev/null 2>&1 || true
+    gh release create "$tag" "$zip" -t "${REPO} ${tag}" -n "$(sed -n '1,200p' CHANGELOG.md 2>/dev/null || echo "Release ${tag}")"
+  else
+    [[ -z "${GITHUB_TOKEN:-}" ]] && { warn "gh not found and GITHUB_TOKEN not set. Skipping Release creation."; return; }
+    say "Creating GitHub Release via API"
+    UPLOAD_URL=$(curl -fsSL -X POST \
+      -H "Authorization: token ${GITHUB_TOKEN}" \
+      -H "Accept: application/vnd.github+json" \
+      "https://api.github.com/repos/${OWNER}/${REPO}/releases" \
+      -d "{\"tag_name\":\"${tag}\",\"name\":\"${REPO} ${tag}\",\"body\":\"$(printf %s "$(sed -n '1,200p' CHANGELOG.md 2>/dev/null || echo "Release ${tag}")" | sed 's/"/\\"/g')\"}" \
+      | python3 -c "import sys,json;print(json.loads(sys.stdin.read()).get('upload_url','').split('{')[0])")
+    [[ -z "$UPLOAD_URL" ]] && { warn "Release POST may have failed (or already exists). Trying upload anyway."; }
+    curl -fsSL -X POST -H "Authorization: token ${GITHUB_TOKEN}" -H "Content-Type: application/zip" \
+      --data-binary @"${zip}" "${UPLOAD_URL}?name=$(basename "$zip")" >/dev/null 2>&1 || true
+  fi
+}
+
+# =========================
+# Pre-flight
+# =========================
+require_cmd git
+[[ -f "$MAIN_FILE" ]] || { err "Missing $MAIN_FILE in $(pwd)"; exit 1; }
+
+# Ensure repo
 if [[ ! -d .git ]]; then
-  git init
+  say "Initializing git repo (main)"
+  git init >/dev/null
   git branch -M main
 fi
 
-if ! git remote | grep -q origin; then
+# Ensure origin
+if ! git remote | grep -q '^origin$'; then
+  say "Adding origin $REMOTE_URL"
   git remote add origin "$REMOTE_URL"
 fi
 
-git fetch origin main || true
+# Fetch remote info (if exists)
+git fetch origin main >/dev/null 2>&1 || true
+LOCAL_HASH="$(git rev-parse HEAD 2>/dev/null || echo 'none')"
+REMOTE_HASH="$(git rev-parse origin/main 2>/dev/null || echo 'none')"
 
-LOCAL_HASH=$(git rev-parse HEAD 2>/dev/null || echo "none")
-REMOTE_HASH=$(git rev-parse origin/main 2>/dev/null || echo "none")
-
-if [[ "$REMOTE_HASH" != "$LOCAL_HASH" ]]; then
-  if [[ "$FORCE" == true ]]; then
-    git push --force origin main || true
+# Fresh local working copy + remote has commits → force-push path
+if [[ "$LOCAL_HASH" == "none" && "$REMOTE_HASH" != "none" ]]; then
+  warn "Fresh local folder detected & remote has history → forcing sync."
+  git add -A
+  git commit -m "init: import working copy" >/dev/null 2>&1 || true
+  git push --force origin main
+else
+  # Try to rebase if remote exists
+  if [[ "$REMOTE_HASH" != "none" ]]; then
+    say "Syncing with remote (rebase)…"
+    # If pull would overwrite untracked files, skip pull and force push local truth
+    if ! git diff --quiet || [[ -n "$(git ls-files --others --exclude-standard)" ]]; then
+      warn "Untracked/modified files present; using local as source of truth."
+      git add -A
+      git commit -m "sync: local working copy" >/dev/null 2>&1 || true
+      git push --force origin main
+    else
+      git pull --rebase origin main || { warn "Rebase failed; forcing local state."; git add -A; git commit -m "sync: local working copy" >/dev/null 2>&1 || true; git push --force origin main; }
+    fi
   else
-    git pull --rebase origin main || true
+    say "No remote main found; will push new main."
+    git add -A
+    git commit -m "init: import working copy" >/dev/null 2>&1 || true
+    git push -u origin main
   fi
 fi
 
-CURRENT=$(grep -Eo 'Version: [0-9]+' "$PLUGIN_SLUG.php" | awk '{print $2}')
-IFS='.' read -r MAJ MIN PAT <<< "$CURRENT"
+# =========================
+# Version bump & commit
+# =========================
+NEW_VER="$(bump_version)"
+TAG="v${NEW_VER}"
+say "Bumped version → ${NEW_VER}"
 
-case "$BUMP_TYPE" in
-  major) ((MAJ+=1)); MIN=0; PAT=0;;
-  minor) ((MIN+=1)); PAT=0;;
-  patch) ((PAT+=1));;
-  *) echo "Unknown bump type: $BUMP_TYPE"; exit 1;;
-esac
-
-NEW_VERSION="${MAJ}.${MIN}.${PAT}"
-TAG="v${NEW_VERSION}"
-
-sed -i.bak -E "s/(Version: )[0-9]+\.[0-9]+\.[0-9]+/\1${NEW_VERSION}/" "$PLUGIN_SLUG.php"
-sed -i.bak "s/define('BUZZSAW_VERSION', '[0-9.]*')/define('BUZZSAW_VERSION', '${NEW_VERSION}')/" "$PLUGIN_SLUG.php"
-rm -f *.bak
-
-git add .
-git commit -m "chore(release): v${NEW_VERSION}" || true
-git branch -M main
-
-if [[ "$FORCE" == true ]]; then
-  git push --force origin main
+# Update CHANGELOG (prepend minimal entry if not present)
+DATE_UTC="$(date -u +%F)"
+if [[ -f CHANGELOG.md ]]; then
+  tmp="$(mktemp)"; {
+    echo "# Changelog"; echo
+    echo "## [${NEW_VER}] - ${DATE_UTC}"
+    echo "- Release ${NEW_VER}."
+    echo
+    awk 'NR>1{print prev} {prev=$0}' CHANGELOG.md
+  } > "$tmp"
+  mv "$tmp" CHANGELOG.md
 else
-  git push origin main
+  {
+    echo "# Changelog"; echo
+    echo "## [${NEW_VER}] - ${DATE_UTC}"
+    echo "- Release ${NEW_VER}."
+    echo
+  } > CHANGELOG.md
 fi
 
-git tag -d "$TAG" 2>/dev/null || true
-git push origin ":refs/tags/$TAG" 2>/dev/null || true
+git add -A
+git commit -m "chore(release): v${NEW_VER}" >/dev/null 2>&1 || true
+git push origin main --force
 
-git tag -a "$TAG" -m "Release $TAG"
-git push origin "$TAG"
+# =========================
+# Tag & push
+# =========================
+say "Tagging ${TAG}"
+git tag -d "${TAG}" >/dev/null 2>&1 || true
+git push origin ":refs/tags/${TAG}" >/dev/null 2>&1 || true
+git tag -a "${TAG}" -m "Release ${TAG}"
+git push origin "${TAG}"
 
-git archive --format=zip --prefix="${PLUGIN_SLUG}/" "$TAG" -o "../${PLUGIN_SLUG}-${TAG}.zip"
-echo "✅ Release complete: $TAG"
+# =========================
+# Build ZIP & Release
+# =========================
+clean_zip_build "${TAG}"
+create_release "${TAG}"
+
+say "✅ Done. Pushed main, created ${TAG}, built ZIP and published release."
