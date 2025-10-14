@@ -9,7 +9,7 @@
 
 if (!defined('ABSPATH')) exit;
 
-define('BUZZSAW_VERSION', '1..1');
+define('BUZZSAW_VERSION', '0.0.1');
 define('BUZZSAW_PATH', plugin_dir_path(__FILE__));
 define('BUZZSAW_URL',  plugin_dir_url(__FILE__));
 define('BUZZSAW_BASE_PATH', '/mnt/ccpi/mnt/nas/Website-Orders');
