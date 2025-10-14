@@ -1,4 +1,4 @@
-# Buzzsaw — Affiliate-Side WooCommerce Plugin (v1.1.6)
+# Buzzsaw — Affiliate-Side WooCommerce Plugin
 
 **Fixed destination**:
 ```
