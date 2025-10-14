@@ -4,6 +4,10 @@
 - Release 0.0.1.
 
 
+## [0.0.1] - 2025-10-14
+- Release 0.0.1.
+
+
 ## [1.1.13] - 2025-10-14
 - Corrected ZIP structure to use a single root folder 'buzzsaw/'.
 
