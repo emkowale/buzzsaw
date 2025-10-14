@@ -1,0 +1,4 @@
+#buzzsaw-progress{ display:flex; align-items:center; gap:16px; margin-top:16px; }
+#buzzsaw-pct{ font-size: 28px; font-weight: 600; }
+#buzzsaw-status{ color:#444; opacity:.9; }
+#buzzsaw-controls .button{ margin-right:8px; }
