@@ -20,29 +20,58 @@ err(){ printf "\033[1;31m%s\033[0m\n" "$*" >&2; }
 
 [[ -f "$MAIN_FILE" ]] || { err "Missing $MAIN_FILE in $(pwd)"; exit 1; }
 
+# -------- Robust version helpers (no silent fallback/reset) --------
 read_version() {
-  awk 'BEGIN{IGNORECASE=1}
-       /Version:/ && match($0,/Version:[ \t]*([0-9]+\.[0-9]+\.[0-9]+)/,m){print m[1]; exit}' "$MAIN_FILE" | tr -d '\r' || true
+  # First "Version: x.y.z" (case-insensitive), allow leading punctuation (like "* ")
+  local line
+  line="$(grep -Eim1 '^[[:space:][:punct:]]*Version:[[:space:]]*[0-9]+\.[0-9]+\.[0-9]+' "$MAIN_FILE" || true)"
+  [[ -n "$line" ]] && echo "$line" | sed -E 's/.*Version:[[:space:]]*([0-9]+\.[0-9]+\.[0-9]+).*/\1/'
 }
 
-fallback_constant() {
-  awk 'BEGIN{IGNORECASE=1}
-       /BUZZSAW_VERSION/ && match($0,/[\"\x27]([0-9]+\.[0-9]+\.[0-9]+)[\"\x27]/,v){print v[1]; exit}' "$MAIN_FILE" | tr -d '\r' || true
+read_constant_version() {
+  # Find BUZZSAW_VERSION and extract number in single or double quotes
+  local line
+  line="$(grep -Eim1 "BUZZSAW_VERSION" "$MAIN_FILE" || true)"
+  [[ -n "$line" ]] && echo "$line" | sed -E "s/.*['\"]([0-9]+\.[0-9]+\.[0-9]+)['\"].*/\1/"
 }
 
 write_version() {
   local new="$1"
+  # Normalize CRLF to LF
   sed -i 's/\r$//' "$MAIN_FILE" 2>/dev/null || true
-  # Update header (first match), case-insensitive
-  sed -i -E "0,/^[[:space:][:punct:]]*[Vv]ersion:[[:space:]]*[0-9]+\.[0-9]+\.[0-9]+/s//Version: ${new}/" "$MAIN_FILE" || true
-  # Update constant
-  sed -i -E "s/(define\('BUZZSAW_VERSION',[[:space:]]*')[^']+(')/\1${new}\2/" "$MAIN_FILE" || true
+
+  # Update header "Version:" (first occurrence). If missing, insert after "Plugin Name:".
+  if grep -Eiq '^[[:space:][:punct:]]*Version:[[:space:]]*[0-9]+\.[0-9]+\.[0-9]+' "$MAIN_FILE"; then
+    # shellcheck disable=SC2016
+    sed -i -E "0,/^[[:space:][:punct:]]*[Vv]ersion:[[:space:]]*[0-9]+\.[0-9]+\.[0-9]+/s//Version: ${new}/" "$MAIN_FILE"
+  else
+    sed -i -E "0,/^[[:space:][:punct:]]*Plugin[[:space:]]+Name:/s//&\n * Version: ${new}/" "$MAIN_FILE"
+  fi
+
+  # Update define('BUZZSAW_VERSION','x.y.z') — add if missing
+  if grep -Eiq "define\('BUZZSAW_VERSION'[[:space:]]*," "$MAIN_FILE"; then
+    sed -i -E "s/(define\('BUZZSAW_VERSION'[[:space:]]*,[[:space:]]*')[^']+('))/\1${new}\2/" "$MAIN_FILE" \
+      || sed -i -E "s/(define\(\"BUZZSAW_VERSION\"[[:space:]]*,[[:space:]]*\")[^\"]+(\"))/\1${new}\2/" "$MAIN_FILE"
+  else
+    # Insert the constant immediately after the header block closing "*/" if present, else after first line
+    if grep -n '^\s*\*/\s*$' "$MAIN_FILE" >/dev/null 2>&1; then
+      # insert after first end-of-header marker
+      ln=$(grep -n '^\s*\*/\s*$' "$MAIN_FILE" | head -1 | cut -d: -f1)
+      awk -v ln="$ln" -v ver="$new" 'NR==ln{print; print "define('\''BUZZSAW_VERSION'\'', '\''" ver "'\'');"; next} {print}' "$MAIN_FILE" > .tmp.$$ && mv .tmp.$$ "$MAIN_FILE"
+    else
+      awk -v ver="$new" 'NR==1{print; print "define('\''BUZZSAW_VERSION'\'', '\''" ver "'\'');"; next} {print}' "$MAIN_FILE" > .tmp.$$ && mv .tmp.$$ "$MAIN_FILE"
+    fi
+  fi
 }
 
 bump_version() {
   local current vmaj vmin vpatch new
-  current="$(read_version)"; [[ -z "$current" ]] && current="$(fallback_constant)"
-  [[ -z "$current" || ! "$current" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] && current="0.0.0"
+  current="$(read_version)"; [[ -z "$current" ]] && current="$(read_constant_version)"
+  if [[ -z "$current" || ! "$current" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+    err "Could not parse a valid version from $MAIN_FILE. Please set both header and constant to something like 1.1.16."
+    exit 1
+  fi
+
   IFS='.' read -r vmaj vmin vpatch <<<"$current"
   case "$BUMP_TYPE" in
     major) vmaj=$((vmaj+1)); vmin=0; vpatch=0;;
@@ -55,18 +84,31 @@ bump_version() {
   printf "%s" "$new"
 }
 
-# Git bootstrap & sync (always prefer local working copy as truth)
-if [[ ! -d .git ]]; then git init >/dev/null; git branch -M main; fi
+# -------- Optional one-time override: export BUZZSAW_FORCE_VERSION=1.1.16 --------
+if [[ -n "${BUZZSAW_FORCE_VERSION:-}" ]]; then
+  say "Forcing version to ${BUZZSAW_FORCE_VERSION} before bump."
+  write_version "$BUZZSAW_FORCE_VERSION"
+fi
+
+# -------- Git bootstrap & sync (prefer local working copy as truth) --------
+if [[ ! -d .git ]]; then
+  git init >/dev/null
+  git branch -M main
+fi
 git remote | grep -q '^origin$' || git remote add origin "$REMOTE_URL"
 git fetch origin main >/dev/null 2>&1 || true
+
+# If there are untracked/modified files (typical for live plugin dir), force-push local truth.
 if [[ -n "$(git ls-files --others --exclude-standard)" || -n "$(git status --porcelain)" ]]; then
   warn "Using local working copy as source of truth."
-  git add -A; git commit -m "sync: local working copy" >/dev/null 2>&1 || true
+  git add -A
+  git commit -m "sync: local working copy" >/dev/null 2>&1 || true
   git push --force origin main || true
 else
   git pull --rebase origin main || true
 fi
 
+# -------- Bump, changelog, commit --------
 NEW_VER="$(bump_version)"; TAG="v${NEW_VER}"
 DATE_UTC="$(date -u +%F)"
 say "Version → ${NEW_VER}"
@@ -80,7 +122,7 @@ git add -A
 git commit -m "chore(release): v${NEW_VER}" >/dev/null 2>&1 || true
 git push origin main --force
 
-# Tag, archive with proper root, and release
+# -------- Tag, archive with proper root, and release --------
 git tag -d "${TAG}" >/dev/null 2>&1 || true
 git push origin ":refs/tags/${TAG}" >/dev/null 2>&1 || true
 git tag -a "${TAG}" -m "Release ${TAG}"
