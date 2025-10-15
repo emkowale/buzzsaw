@@ -46,3 +46,4 @@ class Buzzsaw_Cron {
         wp_schedule_single_event($when->getTimestamp(), self::HOOK);
     }
 }
+
