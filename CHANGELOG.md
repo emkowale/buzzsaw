@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.1.19] - 2025-11-01
+
+### Changes
+* Release 1.1.19
+
+# Changelog
+
 ## [1.1.17] - 2025-10-15
 - Release 1.1.17.
 
